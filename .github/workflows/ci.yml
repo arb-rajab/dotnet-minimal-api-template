@@ -1,0 +1,188 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DOTNET_VERSION: "10.0.x"
+  DOTNET_NOLOGO: "true"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "true"
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: build-and-test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Pull Docker Hub images through mirror.gcr.io
+        # Docker Hub rate-limits anonymous pulls and has outages. As a daemon
+        # registry mirror, mirror.gcr.io (Google's cache of popular Docker
+        # Hub images) is tried first and Docker Hub is the fallback on a
+        # cache miss. registry-mirrors is reloadable, so SIGHUP applies it
+        # without stopping service containers.
+        run: |
+          sudo sh -c '[ -s /etc/docker/daemon.json ] || echo "{}" > /etc/docker/daemon.json'
+          sudo cat /etc/docker/daemon.json \
+            | jq '. + {"registry-mirrors": ["https://mirror.gcr.io"]}' > "$RUNNER_TEMP/daemon.json"
+          sudo cp "$RUNNER_TEMP/daemon.json" /etc/docker/daemon.json
+          sudo systemctl reload docker
+          for _ in $(seq 1 15); do
+            docker info --format '{{.RegistryConfig.Mirrors}}' | grep -q mirror.gcr.io && exit 0
+            sleep 1
+          done
+          echo "::error::Docker did not pick up the registry mirror"
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ProjectName.slnx
+
+      - name: Format check (lint)
+        run: dotnet format ProjectName.slnx --verify-no-changes --severity warn
+
+      - name: Build
+        run: dotnet build ProjectName.slnx --configuration Release --no-restore
+
+      - name: Unit tests
+        run: >
+          dotnet test tests/ProjectName.UnitTests/ProjectName.UnitTests.csproj
+          --configuration Release --no-build
+          --logger "trx;LogFileName=unit-tests.trx"
+          --results-directory ./test-results
+
+      - name: Integration tests (Testcontainers + real MongoDB)
+        run: >
+          dotnet test tests/ProjectName.IntegrationTests/ProjectName.IntegrationTests.csproj
+          --configuration Release --no-build
+          --logger "trx;LogFileName=integration-tests.trx"
+          --results-directory ./test-results
+
+      - name: Publish test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: test-results
+          path: ./test-results
+
+  docker-build:
+    name: docker-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build API image
+        run: docker build -t projectname-api:ci .
+
+      # Optional: remove with workers/
+      - name: Build worker image
+        run: docker build -t projectname-worker:ci -f Dockerfile.worker .
+
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  codeql:
+    name: CodeQL (csharp)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: csharp
+          build-mode: manual
+
+      # Explicit build: CodeQL traces this compilation to extract C#.
+      - name: Build
+        run: dotnet build ProjectName.slnx --configuration Release
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: "/language:csharp"
+
+  # CodeQL for this repo's own GitHub Actions workflows (injection via
+  # untrusted event data, over-broad token permissions, unsafe checkouts).
+  codeql-actions:
+    name: CodeQL (actions)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          languages: actions
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4
+        with:
+          category: "/language:actions"
+
+  dependency-scan:
+    name: Dependency scan (NuGet vulnerabilities)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        run: dotnet restore ProjectName.slnx
+
+      # `dotnet list package --vulnerable` exits 0 even when it finds
+      # vulnerabilities, so fail explicitly on its report text.
+      - name: Fail on vulnerable packages
+        run: |
+          set -o pipefail
+          dotnet list ProjectName.slnx package --vulnerable --include-transitive 2>&1 | tee vulnerable.txt
+          if grep -q "has the following vulnerable packages" vulnerable.txt; then
+            echo "::error::Vulnerable NuGet packages found (see log above)"
+            exit 1
+          fi
+          if grep -Eqi "error|unable to load the service index|failed to retrieve vulnerability" vulnerable.txt; then
+            echo "::error::Vulnerability scan did not complete cleanly"
+            exit 1
+          fi

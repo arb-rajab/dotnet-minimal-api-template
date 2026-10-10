@@ -1,0 +1,25 @@
+# ---- build stage ----
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+WORKDIR /src
+
+COPY workers/ProjectName.Worker/ProjectName.Worker.csproj workers/ProjectName.Worker/
+RUN dotnet restore workers/ProjectName.Worker/ProjectName.Worker.csproj
+
+COPY workers/ProjectName.Worker/ workers/ProjectName.Worker/
+RUN dotnet publish workers/ProjectName.Worker/ProjectName.Worker.csproj \
+    -c Release \
+    -o /app/publish \
+    --no-restore
+
+# ---- runtime stage ----
+FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
+WORKDIR /app
+
+RUN groupadd --gid 10001 projectname \
+    && useradd --uid 10001 --gid projectname --shell /usr/sbin/nologin --no-create-home projectname
+
+COPY --from=build /app/publish .
+
+USER projectname
+
+ENTRYPOINT ["dotnet", "ProjectName.Worker.dll"]

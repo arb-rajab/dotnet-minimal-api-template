@@ -1,0 +1,18 @@
+# osv-scanner configuration for the "Dependency vulnerability scan" CI job
+# (.github/workflows/security.yml).
+#
+# Every entry here must be a dated exception, not a permanent suppression:
+# once `ignoreUntil` passes, the finding fails the scan again and a human has
+# to either renew the entry (re-confirming the reason still holds) or delete
+# it (because a fix shipped). Entries are by advisory ID, so any NEW advisory
+# against the same package still fails the scan.
+#
+# Format (uncomment and fill in):
+#
+# [[IgnoredVulns]]
+# id = "GHSA-xxxx-xxxx-xxxx"
+# ignoreUntil = 2026-12-31
+# reason = """
+# Why this does not apply or cannot be fixed yet, and what to re-check
+# before the expiry date.
+# """

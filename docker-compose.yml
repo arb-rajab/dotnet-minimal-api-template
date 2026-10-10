@@ -1,0 +1,47 @@
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ASPNETCORE_ENVIRONMENT: "Development"
+      Mongo__ConnectionString: "mongodb://mongo:27017"
+      Mongo__DatabaseName: "projectname"
+      Jwt__Secret: "${PROJECTNAME_JWT_SECRET:?Set PROJECTNAME_JWT_SECRET before starting, e.g. export PROJECTNAME_JWT_SECRET=$(openssl rand -base64 48)}"
+      Jwt__Issuer: "projectname"
+      Jwt__Audience: "projectname-clients"
+      Jwt__ExpiryMinutes: "60"
+      # Optional: seeds one admin user in non-Production when the users
+      # collection is empty. Leave unset to seed nothing.
+      Seed__AdminPassword: "${PROJECTNAME_SEED_ADMIN_PASSWORD:-}"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  # Optional: remove together with workers/ and Dockerfile.worker.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    environment:
+      Worker__Interval: "00:00:30"
+
+volumes:
+  mongo-data:
